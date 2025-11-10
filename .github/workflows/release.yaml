@@ -1,0 +1,96 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      release-exists: ${{ steps.check_release.outputs.release-exists }}
+      version_tag: ${{ steps.get_version.outputs.version_tag }}
+    steps:
+      - name: Get version
+        id: get_version
+        run: |
+          echo "version_tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Check for existing release
+        id: check_release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_TAG: ${{ steps.get_version.outputs.version_tag }}
+        run: |
+          echo "Check for release ${VERSION_TAG}"
+          if [[ "$(gh release view ${VERSION_TAG} -R ${GITHUB_REPOSITORY} 2>&1)" == "release not found" ]]; then
+            echo "Release does not exist."
+            echo "release-exists=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release already exists."
+            echo "release-exists=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs:
+      - meta
+    if: ${{ needs.meta.outputs.release-exists == 'false'}}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-arch:
+          - arm64
+        go-os:
+          - darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          repository: dexidp/dex
+          ref: ${{ needs.meta.outputs.version_tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOARCH: ${{ matrix.go-arch }}
+          GOOS: ${{ matrix.go-os }}
+          VERSION: ${{ needs.meta.output.version_tag }}
+        run: |
+          mkdir bin
+          sed -i'' 's|/go/bin|bin|' Makefile
+          make release-binary
+          mv bin/dex bin/dex-${GOOS}-${GOARCH}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: "dex-${{ matrix.go-os }}-${{ matrix.go-arch }}"
+          path: "bin/dex-${{ matrix.go-os }}-${{ matrix.go-arch }}"
+          retention-days: 1
+
+  publish:
+    permissions:
+      contents: write
+    needs:
+      - meta
+      - build
+    if: ${{ needs.meta.outputs.release-exists == 'false'}}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      - name: List downloaded files
+        run: |
+          ls -R
+      - uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
+        with:
+          tag_name: ${{ needs.meta.outputs.version_tag }}
+          files: |
+            ./dex-*
